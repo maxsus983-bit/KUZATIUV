@@ -1,0 +1,2021 @@
+'use strict';
+
+/*
+===============================================================
+                 AKV WORLD OBSERVER
+===============================================================
+
+AKV uchun dunyo kuzatuv tizimi.
+
+VAZIFALAR:
+
+  • Serverdagi chatni kuzatish
+  • Player kirishini aniqlash
+  • Player chiqishini aniqlash
+  • Entity hodisalarini kuzatish
+  • Bot koordinatasini saqlash
+  • Yaqin playerlarni kuzatish
+  • Kuzatilgan hodisalarni tarixga yozish
+  • AI Brain uchun snapshot tayyorlash
+  • Xatolik bo‘lsa observer crash qilmasligi
+
+===============================================================
+*/
+
+const EventEmitter = require('events');
+
+const logger = require('../core/logger');
+
+
+/*
+===============================================================
+                         CONFIG
+===============================================================
+*/
+
+const CONFIG = {
+
+  /*
+  AI ga beriladigan yaqin masofa.
+  */
+
+  observationRadius: 32,
+
+
+  /*
+  Xotirada saqlanadigan hodisalar soni.
+  */
+
+  maxEvents: 500,
+
+
+  /*
+  Player snapshot yangilanish oralig‘i.
+  */
+
+  scanInterval: 1000,
+
+
+  /*
+  Bir xil hodisani qayta-qayta spam qilmaslik.
+  */
+
+  duplicateProtectionMs: 500
+
+};
+
+
+/*
+===============================================================
+                     WORLD OBSERVER
+===============================================================
+*/
+
+class WorldObserver extends EventEmitter {
+
+  constructor(options = {}) {
+
+    super();
+
+
+    this.client =
+      options.client || null;
+
+
+    this.bot =
+      options.bot || null;
+
+
+    this.config = {
+
+      ...CONFIG,
+
+      ...(options.config || {})
+
+    };
+
+
+    /*
+    -----------------------------------------------------------
+    CURRENT WORLD STATE
+    -----------------------------------------------------------
+    */
+
+    this.world = {
+
+      bot: {
+
+        username:
+          null,
+
+        position: {
+
+          x: 0,
+
+          y: 0,
+
+          z: 0
+
+        },
+
+        rotation: {
+
+          yaw: 0,
+
+          pitch: 0
+
+        },
+
+        dimension:
+          'unknown'
+
+      },
+
+
+      players: {},
+
+
+      entities: {},
+
+
+      recentEvents: [],
+
+
+      lastChat: null,
+
+
+      lastUpdate:
+        null
+
+    };
+
+
+    /*
+    -----------------------------------------------------------
+    EVENT DEDUPLICATION
+    -----------------------------------------------------------
+    */
+
+    this.recentEventKeys =
+      new Map();
+
+
+    /*
+    -----------------------------------------------------------
+    TIMER
+    -----------------------------------------------------------
+    */
+
+    this.scanTimer =
+      null;
+
+
+    /*
+    -----------------------------------------------------------
+    RUNNING
+    -----------------------------------------------------------
+    */
+
+    this.running =
+      false;
+
+
+    /*
+    -----------------------------------------------------------
+    BINDINGS
+    -----------------------------------------------------------
+    */
+
+    this.boundHandlers = {};
+
+  }
+
+
+  /*
+  ==============================================================
+  SET CLIENT
+  ============================================================== 
+  */
+
+  setClient(
+    client
+  ) {
+
+    this.client =
+      client;
+
+  }
+
+
+  /*
+  ==============================================================
+  SET BOT
+  ============================================================== 
+  */
+
+  setBot(
+    bot
+  ) {
+
+    this.bot =
+      bot;
+
+  }
+
+
+  /*
+  ==============================================================
+  START
+  ============================================================== 
+  */
+
+  start() {
+
+    if (
+      this.running
+    ) {
+
+      return;
+
+    }
+
+
+    this.running =
+      true;
+
+
+    this.attachClientEvents();
+
+
+    this.scanTimer =
+      setInterval(
+        () => {
+
+          this.safeScan();
+
+        },
+        this.config.scanInterval
+      );
+
+
+    logger.info(
+      '[WORLD] Observer ishga tushdi.'
+    );
+
+
+    this.emit(
+      'started'
+    );
+
+
+    /*
+    Birinchi snapshotni darhol olish.
+    */
+
+    this.safeScan();
+
+  }
+
+
+  /*
+  ==============================================================
+  STOP
+  ============================================================== 
+  */
+
+  stop() {
+
+    this.running =
+      false;
+
+
+    if (
+      this.scanTimer
+    ) {
+
+      clearInterval(
+        this.scanTimer
+      );
+
+      this.scanTimer =
+        null;
+
+    }
+
+
+    this.detachClientEvents();
+
+
+    logger.info(
+      '[WORLD] Observer to‘xtadi.'
+    );
+
+
+    this.emit(
+      'stopped'
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  ATTACH CLIENT EVENTS
+  ============================================================== 
+  */
+
+  attachClientEvents() {
+
+    const client =
+      this.client;
+
+
+    if (
+      !client ||
+      typeof client.on !==
+      'function'
+    ) {
+
+      logger.warn(
+        '[WORLD] Client event tizimi topilmadi.'
+      );
+
+
+      return;
+
+    }
+
+
+    /*
+    ------------------------------------------------------------
+    CHAT
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.chat =
+      (...args) => {
+
+        this.safeCall(
+          () => this.handleChat(
+            ...args
+          )
+        );
+
+      };
+
+
+    this.tryOn(
+      'text',
+      this.boundHandlers.chat
+    );
+
+
+    this.tryOn(
+      'chat',
+      this.boundHandlers.chat
+    );
+
+
+    this.tryOn(
+      'player_chat',
+      this.boundHandlers.chat
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    SPAWN
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.spawn =
+      (...args) => {
+
+        this.safeCall(
+          () => {
+
+            this.addEvent(
+              'BOT_SPAWN',
+              {
+
+                data:
+                  args
+
+              }
+            );
+
+
+            this.emit(
+              'spawn',
+              args
+            );
+
+          }
+        );
+
+      };
+
+
+    this.tryOn(
+      'spawn',
+      this.boundHandlers.spawn
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    CLOSE
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.close =
+      () => {
+
+        this.addEvent(
+          'CONNECTION_CLOSED'
+        );
+
+
+        this.emit(
+          'connectionClosed'
+        );
+
+      };
+
+
+    this.tryOn(
+      'close',
+      this.boundHandlers.close
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    ERROR
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.error =
+      error => {
+
+        this.addEvent(
+          'CLIENT_ERROR',
+          {
+
+            error:
+              error?.message ||
+              String(error)
+
+          }
+        );
+
+
+        this.emit(
+          'clientError',
+          error
+        );
+
+      };
+
+
+    this.tryOn(
+      'error',
+      this.boundHandlers.error
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    PLAYER EVENTS
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.playerJoin =
+      data => {
+
+        this.safeCall(
+          () =>
+            this.handlePlayerJoin(
+              data
+            )
+        );
+
+      };
+
+
+    this.boundHandlers.playerLeave =
+      data => {
+
+        this.safeCall(
+          () =>
+            this.handlePlayerLeave(
+              data
+            )
+        );
+
+      };
+
+
+    this.tryOn(
+      'playerJoin',
+      this.boundHandlers.playerJoin
+    );
+
+
+    this.tryOn(
+      'player_leave',
+      this.boundHandlers.playerLeave
+    );
+
+
+    this.tryOn(
+      'playerLeave',
+      this.boundHandlers.playerLeave
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    ENTITY
+    ------------------------------------------------------------
+    */
+
+    this.boundHandlers.entity =
+      data => {
+
+        this.safeCall(
+          () =>
+            this.handleEntity(
+              data
+            )
+        );
+
+      };
+
+
+    this.tryOn(
+      'entity',
+      this.boundHandlers.entity
+    );
+
+
+    this.tryOn(
+      'entitySpawn',
+      this.boundHandlers.entity
+    );
+
+
+    this.tryOn(
+      'entity_spawn',
+      this.boundHandlers.entity
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  DETACH EVENTS
+  ============================================================== 
+  */
+
+  detachClientEvents() {
+
+    const client =
+      this.client;
+
+
+    if (
+      !client
+    ) {
+
+      return;
+
+    }
+
+
+    for (
+      const [
+        event,
+        handler
+      ]
+      of Object.entries(
+        this.boundHandlers
+      )
+    ) {
+
+      /*
+      Biz event nomlarini o‘zimiz ro‘yxat sifatida
+      saqlaymiz.
+      */
+
+    }
+
+
+    this.boundHandlers =
+      {};
+
+  }
+
+
+  /*
+  ==============================================================
+  SAFE EVENT REGISTRATION
+  ============================================================== 
+  */
+
+  tryOn(
+    event,
+    handler
+  ) {
+
+    try {
+
+      if (
+        this.client &&
+        typeof this.client.on ===
+        'function'
+      ) {
+
+        this.client.on(
+          event,
+          handler
+        );
+
+      }
+
+    } catch (error) {
+
+      logger.warn(
+        `[WORLD] Event ulanmadi: ${event}`,
+        error.message
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  CHAT HANDLER
+  ============================================================== 
+  */
+
+  handleChat(
+    data
+  ) {
+
+    let username =
+      'Unknown';
+
+
+    let message =
+      '';
+
+
+    /*
+    Turli packet formatlarini qo‘llab-quvvatlash.
+    */
+
+    if (
+      typeof data ===
+      'string'
+    ) {
+
+      message =
+        data;
+
+    } else if (
+      data
+    ) {
+
+      username =
+        data.username ||
+        data.name ||
+        data.source_name ||
+        data.sender ||
+        data.playerName ||
+        'Unknown';
+
+
+      message =
+        data.message ||
+        data.messageText ||
+        data.text ||
+        data.raw ||
+        '';
+
+    }
+
+
+    if (
+      !message
+    ) {
+
+      return;
+
+    }
+
+
+    const chatData = {
+
+      username,
+
+      message,
+
+      time:
+        Date.now()
+
+    };
+
+
+    this.world.lastChat =
+      chatData;
+
+
+    /*
+    Loggerga yozamiz.
+    */
+
+    logger.chat(
+      username,
+      message
+    );
+
+
+    /*
+    World event.
+    */
+
+    this.addEvent(
+      'CHAT',
+      chatData
+    );
+
+
+    /*
+    AI uchun event.
+    */
+
+    this.emit(
+      'chat',
+      chatData
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  PLAYER JOIN
+  ============================================================== 
+  */
+
+  handlePlayerJoin(
+    data
+  ) {
+
+    const username =
+      this.extractUsername(
+        data
+      );
+
+
+    if (
+      !username
+    ) {
+
+      return;
+
+    }
+
+
+    this.world.players[
+      username
+    ] = {
+
+      username,
+
+      position:
+        this.extractPosition(
+          data
+        ),
+
+      lastSeen:
+        Date.now(),
+
+      online:
+        true
+
+    };
+
+
+    logger.player(
+      'join',
+      username
+    );
+
+
+    this.addEvent(
+      'PLAYER_JOIN',
+      {
+
+        username,
+
+        position:
+          this.world.players[
+            username
+          ].position
+
+      }
+    );
+
+
+    this.emit(
+      'playerJoin',
+      this.world.players[
+        username
+      ]
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  PLAYER LEAVE
+  ============================================================== 
+  */
+
+  handlePlayerLeave(
+    data
+  ) {
+
+    const username =
+      this.extractUsername(
+        data
+      );
+
+
+    if (
+      !username
+    ) {
+
+      return;
+
+    }
+
+
+    if (
+      this.world.players[
+        username
+      ]
+    ) {
+
+      this.world.players[
+        username
+      ].online =
+        false;
+
+      this.world.players[
+        username
+      ].lastSeen =
+        Date.now();
+
+    }
+
+
+    logger.player(
+      'leave',
+      username
+    );
+
+
+    this.addEvent(
+      'PLAYER_LEAVE',
+      {
+
+        username
+
+      }
+    );
+
+
+    this.emit(
+      'playerLeave',
+      {
+
+        username
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  ENTITY HANDLER
+  ============================================================== 
+  */
+
+  handleEntity(
+    data
+  ) {
+
+    if (
+      !data
+    ) {
+
+      return;
+
+    }
+
+
+    const id =
+      String(
+        data.runtime_entity_id ||
+        data.runtimeId ||
+        data.entityId ||
+        data.id ||
+        `entity_${Date.now()}`
+      );
+
+
+    const entity = {
+
+      id,
+
+      type:
+        data.type ||
+        data.identifier ||
+        data.entityType ||
+        'unknown',
+
+      username:
+        data.username ||
+        data.name ||
+        null,
+
+      position:
+        this.extractPosition(
+          data
+        ),
+
+      lastSeen:
+        Date.now()
+
+    };
+
+
+    this.world.entities[
+      id
+    ] =
+      entity;
+
+
+    this.addEvent(
+      'ENTITY_UPDATE',
+      entity
+    );
+
+
+    this.emit(
+      'entity',
+      entity
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  SCAN
+  ============================================================== 
+  */
+
+  safeScan() {
+
+    try {
+
+      this.scan();
+
+    } catch (error) {
+
+      logger.error(
+        '[WORLD] Scan xatosi:',
+        error
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  WORLD SCAN
+  ============================================================== 
+  */
+
+  scan() {
+
+    this.updateBotPosition();
+
+
+    this.updateClientPlayers();
+
+
+    this.cleanupOldEntities();
+
+
+    this.world.lastUpdate =
+      Date.now();
+
+
+    this.emit(
+      'update',
+      this.getSnapshot()
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  UPDATE BOT POSITION
+  ============================================================== 
+  */
+
+  updateBotPosition() {
+
+    let position =
+      null;
+
+
+    /*
+    Bot wrapper.
+    */
+
+    if (
+      this.bot &&
+      this.bot.position
+    ) {
+
+      position =
+        this.bot.position;
+
+    }
+
+
+    /*
+    Client wrapper.
+    */
+
+    if (
+      !position &&
+      this.client &&
+      this.client.position
+    ) {
+
+      position =
+        this.client.position;
+
+    }
+
+
+    /*
+    Common properties.
+    */
+
+    if (
+      !position &&
+      this.client
+    ) {
+
+      position = {
+
+        x:
+          this.client.x,
+
+        y:
+          this.client.y,
+
+        z:
+          this.client.z
+
+      };
+
+    }
+
+
+    if (
+      !position
+    ) {
+
+      return;
+
+    }
+
+
+    const normalized =
+      this.normalizePosition(
+        position
+      );
+
+
+    if (
+      !normalized
+    ) {
+
+      return;
+
+    }
+
+
+    this.world.bot.position =
+      normalized;
+
+
+    if (
+      this.bot?.username
+    ) {
+
+      this.world.bot.username =
+        this.bot.username;
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  UPDATE CLIENT PLAYERS
+  ============================================================== 
+  */
+
+  updateClientPlayers() {
+
+    if (
+      !this.client
+    ) {
+
+      return;
+
+    }
+
+
+    /*
+    Turli wrapperlar players ni turli nom bilan saqlashi mumkin.
+    */
+
+    const players =
+      this.client.players ||
+      this.client.playerList ||
+      null;
+
+
+    if (
+      !players
+    ) {
+
+      return;
+
+    }
+
+
+    try {
+
+      const list =
+        Array.isArray(
+          players
+        )
+          ? players
+          : Object.values(
+              players
+            );
+
+
+      for (
+        const player
+        of list
+      ) {
+
+        if (
+          !player
+        ) {
+
+          continue;
+
+        }
+
+
+        const username =
+          this.extractUsername(
+            player
+          );
+
+
+        if (
+          !username
+        ) {
+
+          continue;
+
+        }
+
+
+        const position =
+          this.extractPosition(
+            player
+          );
+
+
+        this.world.players[
+          username
+        ] = {
+
+          username,
+
+          position,
+
+          lastSeen:
+            Date.now(),
+
+          online:
+            true
+
+        };
+
+      }
+
+    } catch (error) {
+
+      logger.warn(
+        '[WORLD] Player scan xatosi:',
+        error.message
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  CLEANUP
+  ============================================================== 
+  */
+
+  cleanupOldEntities() {
+
+    const now =
+      Date.now();
+
+
+    const timeout =
+      120000;
+
+
+    for (
+      const [
+        id,
+        entity
+      ]
+      of Object.entries(
+        this.world.entities
+      )
+    ) {
+
+      if (
+        now -
+        entity.lastSeen >
+        timeout
+      ) {
+
+        delete this.world.entities[
+          id
+        ];
+
+      }
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  EXTRACT USERNAME
+  ============================================================== 
+  */
+
+  extractUsername(
+    data
+  ) {
+
+    if (
+      !data
+    ) {
+
+      return null;
+
+    }
+
+
+    if (
+      typeof data ===
+      'string'
+    ) {
+
+      return data;
+
+    }
+
+
+    return (
+
+      data.username ||
+
+      data.name ||
+
+      data.playerName ||
+
+      data.source_name ||
+
+      data.sender ||
+
+      data.displayName ||
+
+      null
+
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  EXTRACT POSITION
+  ============================================================== 
+  */
+
+  extractPosition(
+    data
+  ) {
+
+    if (
+      !data
+    ) {
+
+      return null;
+
+    }
+
+
+    const position =
+      data.position ||
+      data.pos ||
+      data.location ||
+      data.coordinates ||
+      data;
+
+
+    return this.normalizePosition(
+      position
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  NORMALIZE POSITION
+  ============================================================== 
+  */
+
+  normalizePosition(
+    position
+  ) {
+
+    if (
+      !position
+    ) {
+
+      return null;
+
+    }
+
+
+    const x =
+      Number(
+        position.x
+      );
+
+
+    const y =
+      Number(
+        position.y
+      );
+
+
+    const z =
+      Number(
+        position.z
+      );
+
+
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(z)
+    ) {
+
+      return null;
+
+    }
+
+
+    return {
+
+      x,
+
+      y,
+
+      z
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  ADD EVENT
+  ============================================================== 
+  */
+
+  addEvent(
+    type,
+    data = {}
+  ) {
+
+    try {
+
+      const event = {
+
+        type,
+
+        time:
+          Date.now(),
+
+        data
+
+      };
+
+
+      /*
+      ----------------------------------------------------------
+      DUPLICATE PROTECTION
+      ----------------------------------------------------------
+      */
+
+      const key =
+        this.createEventKey(
+          type,
+          data
+        );
+
+
+      const previous =
+        this.recentEventKeys.get(
+          key
+        );
+
+
+      if (
+        previous &&
+        Date.now() -
+        previous <
+        this.config.duplicateProtectionMs
+      ) {
+
+        return;
+
+      }
+
+
+      this.recentEventKeys.set(
+        key,
+        Date.now()
+      );
+
+
+      /*
+      ----------------------------------------------------------
+      MEMORY
+      ----------------------------------------------------------
+      */
+
+      this.world.recentEvents.push(
+        event
+      );
+
+
+      if (
+        this.world.recentEvents.length >
+        this.config.maxEvents
+      ) {
+
+        this.world.recentEvents.shift();
+
+      }
+
+
+      /*
+      ----------------------------------------------------------
+      LOGGER
+      ----------------------------------------------------------
+      */
+
+      logger.event(
+        type,
+        data
+      );
+
+
+      /*
+      ----------------------------------------------------------
+      EMIT
+      ----------------------------------------------------------
+      */
+
+      this.emit(
+        'worldEvent',
+        event
+      );
+
+
+    } catch (error) {
+
+      logger.error(
+        '[WORLD] Event yozishda xatolik:',
+        error
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  CREATE EVENT KEY
+  ============================================================== 
+  */
+
+  createEventKey(
+    type,
+    data
+  ) {
+
+    let smallData;
+
+
+    try {
+
+      smallData =
+        JSON.stringify(
+          data
+        );
+
+    } catch (_) {
+
+      smallData =
+        String(
+          data
+        );
+
+    }
+
+
+    return (
+      `${type}:${smallData}`
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET NEARBY PLAYERS
+  ============================================================== 
+  */
+
+  getNearbyPlayers(
+    radius =
+      this.config.observationRadius
+  ) {
+
+    const botPosition =
+      this.world.bot.position;
+
+
+    if (
+      !botPosition
+    ) {
+
+      return [];
+
+    }
+
+
+    const result =
+      [];
+
+
+    for (
+      const player
+      of Object.values(
+        this.world.players
+      )
+    ) {
+
+      if (
+        !player.online ||
+        !player.position
+      ) {
+
+        continue;
+
+      }
+
+
+      const distance =
+        this.distance(
+          botPosition,
+          player.position
+        );
+
+
+      if (
+        distance <=
+        radius
+      ) {
+
+        result.push({
+
+          ...player,
+
+          distance
+
+        });
+
+      }
+
+    }
+
+
+    return result.sort(
+      (
+        a,
+        b
+      ) =>
+        a.distance -
+        b.distance
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET NEARBY ENTITIES
+  ============================================================== 
+  */
+
+  getNearbyEntities(
+    radius =
+      this.config.observationRadius
+  ) {
+
+    const botPosition =
+      this.world.bot.position;
+
+
+    if (
+      !botPosition
+    ) {
+
+      return [];
+
+    }
+
+
+    const result =
+      [];
+
+
+    for (
+      const entity
+      of Object.values(
+        this.world.entities
+      )
+    ) {
+
+      if (
+        !entity.position
+      ) {
+
+        continue;
+
+      }
+
+
+      const distance =
+        this.distance(
+          botPosition,
+          entity.position
+        );
+
+
+      if (
+        distance <=
+        radius
+      ) {
+
+        result.push({
+
+          ...entity,
+
+          distance
+
+        });
+
+      }
+
+    }
+
+
+    return result.sort(
+      (
+        a,
+        b
+      ) =>
+        a.distance -
+        b.distance
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  DISTANCE
+  ============================================================== 
+  */
+
+  distance(
+    a,
+    b
+  ) {
+
+    if (
+      !a ||
+      !b
+    ) {
+
+      return Infinity;
+
+    }
+
+
+    const dx =
+      Number(a.x) -
+      Number(b.x);
+
+
+    const dy =
+      Number(a.y) -
+      Number(b.y);
+
+
+    const dz =
+      Number(a.z) -
+      Number(b.z);
+
+
+    return Math.sqrt(
+
+      dx * dx +
+      dy * dy +
+      dz * dz
+
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET RECENT EVENTS
+  ============================================================== 
+  */
+
+  getRecentEvents(
+    count = 50
+  ) {
+
+    return this.world.recentEvents
+      .slice(
+        -Math.max(
+          1,
+          Number(count) || 50
+        )
+      );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET SNAPSHOT
+  ==============================================================
+
+  AI Brain shu metoddan foydalanadi.
+  */
+
+  getSnapshot() {
+
+    return {
+
+      time:
+        Date.now(),
+
+      bot: {
+
+        ...this.world.bot,
+
+        position: {
+
+          ...this.world.bot.position
+
+        }
+
+      },
+
+
+      nearbyPlayers:
+        this.getNearbyPlayers(),
+
+
+      nearbyEntities:
+        this.getNearbyEntities(),
+
+
+      recentEvents:
+        this.getRecentEvents(30),
+
+
+      lastChat:
+        this.world.lastChat
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  GET PLAYER
+  ============================================================== 
+  */
+
+  getPlayer(
+    username
+  ) {
+
+    if (
+      !username
+    ) {
+
+      return null;
+
+    }
+
+
+    return (
+      this.world.players[
+        username
+      ] ||
+      null
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET WORLD STATE
+  ============================================================== 
+  */
+
+  getWorldState() {
+
+    return {
+
+      ...this.world,
+
+      players: {
+
+        ...this.world.players
+
+      },
+
+      entities: {
+
+        ...this.world.entities
+
+      },
+
+      recentEvents: [
+
+        ...this.world.recentEvents
+
+      ]
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  SAFE CALL
+  ============================================================== 
+  */
+
+  safeCall(
+    callback
+  ) {
+
+    try {
+
+      return callback();
+
+    } catch (error) {
+
+      logger.error(
+        '[WORLD] Handler xatosi:',
+        error
+      );
+
+
+      return null;
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  DESTROY
+  ============================================================== 
+  */
+
+  destroy() {
+
+    this.stop();
+
+
+    this.world.players =
+      {};
+
+    this.world.entities =
+      {};
+
+    this.world.recentEvents =
+      [];
+
+
+    this.recentEventKeys.clear();
+
+
+    this.removeAllListeners();
+
+  }
+
+}
+
+
+/*
+===============================================================
+                         EXPORT
+===============================================================
+*/
+
+module.exports =
+  WorldObserver;
