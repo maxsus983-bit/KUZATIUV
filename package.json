@@ -1,0 +1,15 @@
+{
+  "name": "akv-bedrock-ai",
+  "version": "3.0.0",
+  "description": "Autonomous AI Minecraft Bedrock Agent",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bedrock-protocol": "^3.58.3"
+  }
+}
