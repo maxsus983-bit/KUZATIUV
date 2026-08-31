@@ -1,0 +1,1116 @@
+'use strict';
+
+/*
+===============================================================
+                       AKV LOGGER
+===============================================================
+
+AKV BOT UCHUN MARKAZIY LOG TIZIMI
+
+Bu modul:
+
+  ✅ Xatolarni yozadi
+  ✅ Server ulanishlarini yozadi
+  ✅ Bot harakatlarini yozadi
+  ✅ AI qarorlarini yozadi
+  ✅ Player hodisalarini yozadi
+  ✅ Chat hodisalarini yozadi
+  ✅ Muhim eventlarni yozadi
+  ✅ Loglarni faylga saqlaydi
+  ✅ Konsolga ham chiqaradi
+  ✅ Bot crash bo‘lib ketmasligi uchun loggerning o‘zi
+     xatolikdan himoyalangan
+
+Papka:
+
+core/
+└── logger.js
+
+===============================================================
+*/
+
+const fs = require('fs');
+const path = require('path');
+
+
+/*
+===============================================================
+                    LOG CONFIG
+===============================================================
+*/
+
+const CONFIG = {
+
+  /*
+  Log papkasi.
+  */
+
+  logDirectory:
+    path.join(
+      __dirname,
+      '..',
+      'logs'
+    ),
+
+
+  /*
+  Asosiy log fayli.
+  */
+
+  mainFile:
+    'akv.log',
+
+
+  /*
+  Error log.
+  */
+
+  errorFile:
+    'error.log',
+
+
+  /*
+  Event log.
+  */
+
+  eventFile:
+    'events.log',
+
+
+  /*
+  Chat log.
+  */
+
+  chatFile:
+    'chat.log',
+
+
+  /*
+  Har bir fayl maksimal hajmi.
+  MB.
+  */
+
+  maxFileSizeMB:
+    10,
+
+
+  /*
+  Eski loglarni nechta saqlash.
+  */
+
+  maxBackups:
+    10,
+
+
+  /*
+  Konsolga chiqarish.
+  */
+
+  console:
+    true,
+
+
+  /*
+  Faylga yozish.
+  */
+
+  file:
+    true
+
+};
+
+
+/*
+===============================================================
+                  LOGGER CLASS
+===============================================================
+*/
+
+class AKVLogger {
+
+  constructor() {
+
+    this.config =
+      CONFIG;
+
+
+    this.initialized =
+      false;
+
+
+    this.initialize();
+
+  }
+
+
+  /*
+  ==============================================================
+  INITIALIZE
+  ============================================================== 
+  */
+
+  initialize() {
+
+    try {
+
+      /*
+      Log papkasini yaratamiz.
+      */
+
+      if (
+        !fs.existsSync(
+          this.config.logDirectory
+        )
+      ) {
+
+        fs.mkdirSync(
+          this.config.logDirectory,
+          {
+            recursive: true
+          }
+        );
+
+      }
+
+
+      this.initialized =
+        true;
+
+
+      this.info(
+        '================================================'
+      );
+
+
+      this.info(
+        'AKV LOGGER ishga tushdi.'
+      );
+
+
+      this.info(
+        `Log papkasi: ${this.config.logDirectory}`
+      );
+
+
+      this.info(
+        '================================================'
+      );
+
+    } catch (error) {
+
+      /*
+      Loggerning o‘zi ham crash bermasligi kerak.
+      */
+
+      console.error(
+        '[LOGGER INIT ERROR]',
+        error
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  INFO
+  ============================================================== 
+  */
+
+  info(
+    message,
+    ...args
+  ) {
+
+    this.write(
+      'INFO',
+      message,
+      args
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  WARN
+  ============================================================== 
+  */
+
+  warn(
+    message,
+    ...args
+  ) {
+
+    this.write(
+      'WARN',
+      message,
+      args
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  ERROR
+  ============================================================== 
+  */
+
+  error(
+    message,
+    ...args
+  ) {
+
+    this.write(
+      'ERROR',
+      message,
+      args,
+      true
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  DEBUG
+  ============================================================== 
+  */
+
+  debug(
+    message,
+    ...args
+  ) {
+
+    this.write(
+      'DEBUG',
+      message,
+      args
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  EVENT
+  ==============================================================
+
+  Muhim Minecraft hodisalari.
+  */
+
+  event(
+    type,
+    data = {}
+  ) {
+
+    const message =
+      this.safeStringify({
+
+        type,
+
+        data
+
+      });
+
+
+    this.write(
+      'EVENT',
+      message,
+      []
+    );
+
+
+    this.writeToSpecificFile(
+      this.config.eventFile,
+      this.formatLine(
+        'EVENT',
+        message
+      )
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  CHAT
+  ==============================================================
+
+  Chat alohida faylga saqlanadi.
+  */
+
+  chat(
+    username,
+    message
+  ) {
+
+    const data = {
+
+      username:
+        username || 'UNKNOWN',
+
+      message:
+        message || '',
+
+      time:
+        new Date().toISOString()
+
+    };
+
+
+    const text =
+      this.safeStringify(
+        data
+      );
+
+
+    this.write(
+      'CHAT',
+      text,
+      []
+    );
+
+
+    this.writeToSpecificFile(
+      this.config.chatFile,
+      this.formatLine(
+        'CHAT',
+        text
+      )
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  PLAYER
+  ==============================================================
+
+  Playerga oid event.
+  */
+
+  player(
+    action,
+    username,
+    data = {}
+  ) {
+
+    this.event(
+      `PLAYER_${String(action).toUpperCase()}`,
+      {
+
+        username,
+
+        ...data
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  MOVEMENT
+  ==============================================================*/
+
+  movement(
+    direction,
+    distance,
+    data = {}
+  ) {
+
+    this.event(
+      'MOVEMENT',
+      {
+
+        direction,
+
+        distance,
+
+        ...data
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  AI DECISION
+  ==============================================================*/
+
+  ai(
+    decision,
+    data = {}
+  ) {
+
+    this.event(
+      'AI_DECISION',
+      {
+
+        decision,
+
+        ...data
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  CONNECTION
+  ==============================================================*/
+
+  connection(
+    status,
+    data = {}
+  ) {
+
+    this.event(
+      `CONNECTION_${String(status).toUpperCase()}`,
+      data
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  WRITE
+  ==============================================================*/
+
+  write(
+    level,
+    message,
+    args = [],
+    isError = false
+  ) {
+
+    try {
+
+      const formatted =
+        this.formatLine(
+          level,
+          message,
+          args
+        );
+
+
+      /*
+      ----------------------------------------------------------
+      CONSOLE
+      ----------------------------------------------------------
+      */
+
+      if (
+        this.config.console
+      ) {
+
+        if (
+          isError ||
+          level === 'ERROR'
+        ) {
+
+          console.error(
+            formatted
+          );
+
+        } else if (
+          level === 'WARN'
+        ) {
+
+          console.warn(
+            formatted
+          );
+
+        } else {
+
+          console.log(
+            formatted
+          );
+
+        }
+
+      }
+
+
+      /*
+      ----------------------------------------------------------
+      FILE
+      ----------------------------------------------------------
+      */
+
+      if (
+        this.config.file
+      ) {
+
+        this.writeToSpecificFile(
+          this.config.mainFile,
+          formatted
+        );
+
+
+        if (
+          level === 'ERROR'
+        ) {
+
+          this.writeToSpecificFile(
+            this.config.errorFile,
+            formatted
+          );
+
+        }
+
+      }
+
+    } catch (error) {
+
+      /*
+      Logger hech qachon botni o‘ldirmasligi kerak.
+      */
+
+      try {
+
+        console.error(
+          '[LOGGER ERROR]',
+          error
+        );
+
+      } catch (_) {}
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  FORMAT LINE
+  ==============================================================*/
+
+  formatLine(
+    level,
+    message,
+    args = []
+  ) {
+
+    const now =
+      new Date();
+
+
+    const timestamp =
+      now.toISOString();
+
+
+    let extra =
+      '';
+
+
+    if (
+      Array.isArray(args) &&
+      args.length > 0
+    ) {
+
+      extra =
+        ' ' +
+        args
+          .map(
+            item =>
+              this.stringify(
+                item
+              )
+          )
+          .join(
+            ' '
+          );
+
+    }
+
+
+    return (
+
+      `[${timestamp}] ` +
+      `[${level}] ` +
+      `${message}` +
+      `${extra}`
+
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  SAFE STRINGIFY
+  ==============================================================*/
+
+  safeStringify(
+    object
+  ) {
+
+    try {
+
+      return JSON.stringify(
+        object,
+        this.circularReplacer(),
+        2
+      );
+
+    } catch (error) {
+
+      return String(
+        object
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  STRINGIFY
+  ==============================================================*/
+
+  stringify(
+    value
+  ) {
+
+    if (
+      typeof value ===
+      'string'
+    ) {
+
+      return value;
+
+    }
+
+
+    if (
+      value instanceof Error
+    ) {
+
+      return value.stack ||
+        value.message ||
+        String(value);
+
+    }
+
+
+    return this.safeStringify(
+      value
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  CIRCULAR REPLACER
+  ==============================================================*/
+
+  circularReplacer() {
+
+    const seen =
+      new WeakSet();
+
+
+    return (
+      key,
+      value
+    ) => {
+
+      if (
+        typeof value !==
+        'object' ||
+        value === null
+      ) {
+
+        return value;
+
+      }
+
+
+      if (
+        seen.has(
+          value
+        )
+      ) {
+
+        return '[Circular]';
+
+      }
+
+
+      seen.add(
+        value
+      );
+
+
+      return value;
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  WRITE SPECIFIC FILE
+  ==============================================================*/
+
+  writeToSpecificFile(
+    filename,
+    text
+  ) {
+
+    if (
+      !this.config.file
+    ) {
+
+      return;
+
+    }
+
+
+    try {
+
+      const filePath =
+        path.join(
+          this.config.logDirectory,
+          filename
+        );
+
+
+      this.rotateIfNeeded(
+        filePath
+      );
+
+
+      fs.appendFileSync(
+        filePath,
+        `${text}\n`,
+        {
+          encoding:
+            'utf8'
+        }
+      );
+
+    } catch (error) {
+
+      /*
+      Disk/log xatosi botni to'xtatmasin.
+      */
+
+      try {
+
+        console.error(
+          '[LOGGER FILE ERROR]',
+          error.message
+        );
+
+      } catch (_) {}
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  ROTATE
+  ==============================================================*/
+
+  rotateIfNeeded(
+    filePath
+  ) {
+
+    try {
+
+      if (
+        !fs.existsSync(
+          filePath
+        )
+      ) {
+
+        return;
+
+      }
+
+
+      const stats =
+        fs.statSync(
+          filePath
+        );
+
+
+      const maxBytes =
+        this.config.maxFileSizeMB *
+        1024 *
+        1024;
+
+
+      if (
+        stats.size <
+        maxBytes
+      ) {
+
+        return;
+
+      }
+
+
+      /*
+      Eski backup fayllarni suramiz.
+      */
+
+      for (
+        let i =
+          this.config.maxBackups - 1;
+
+        i >= 1;
+
+        i--
+      ) {
+
+        const oldFile =
+          `${filePath}.${i}`;
+
+
+        const newFile =
+          `${filePath}.${i + 1}`;
+
+
+        if (
+          fs.existsSync(
+            oldFile
+          )
+        ) {
+
+          if (
+            i + 1 >
+            this.config.maxBackups
+          ) {
+
+            try {
+
+              fs.unlinkSync(
+                oldFile
+              );
+
+            } catch (_) {}
+
+          } else {
+
+            try {
+
+              fs.renameSync(
+                oldFile,
+                newFile
+              );
+
+            } catch (_) {}
+
+          }
+
+        }
+
+      }
+
+
+      const backup =
+        `${filePath}.1`;
+
+
+      try {
+
+        fs.renameSync(
+          filePath,
+          backup
+        );
+
+      } catch (_) {}
+
+    } catch (error) {
+
+      try {
+
+        console.error(
+          '[LOGGER ROTATE ERROR]',
+          error.message
+        );
+
+      } catch (_) {}
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  GET LOG DIRECTORY
+  ==============================================================*/
+
+  getLogDirectory() {
+
+    return this.config.logDirectory;
+
+  }
+
+
+  /*
+  ==============================================================
+  GET FILE PATH
+  ==============================================================*/
+
+  getFilePath(
+    filename
+  ) {
+
+    return path.join(
+      this.config.logDirectory,
+      filename
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  READ RECENT LOGS
+  ==============================================================*/
+
+  readRecent(
+    filename,
+    lines = 100
+  ) {
+
+    try {
+
+      const filePath =
+        this.getFilePath(
+          filename
+        );
+
+
+      if (
+        !fs.existsSync(
+          filePath
+        )
+      ) {
+
+        return [];
+
+      }
+
+
+      const content =
+        fs.readFileSync(
+          filePath,
+          'utf8'
+        );
+
+
+      return content
+        .split(/\r?\n/)
+        .filter(
+          Boolean
+        )
+        .slice(
+          -Math.max(
+            1,
+            Number(lines) || 100
+          )
+        );
+
+    } catch (error) {
+
+      return [
+
+        `[LOGGER READ ERROR] ${error.message}`
+
+      ];
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  CLEAR LOG
+  ==============================================================*/
+
+  clear(
+    filename
+  ) {
+
+    try {
+
+      const filePath =
+        this.getFilePath(
+          filename
+        );
+
+
+      if (
+        fs.existsSync(
+          filePath
+        )
+      ) {
+
+        fs.writeFileSync(
+          filePath,
+          '',
+          'utf8'
+        );
+
+      }
+
+
+      return true;
+
+    } catch (error) {
+
+      this.error(
+        'Logni tozalashda xatolik:',
+        error.message
+      );
+
+
+      return false;
+
+    }
+
+  }
+
+}
+
+
+/*
+===============================================================
+                 SINGLE LOGGER INSTANCE
+===============================================================
+*/
+
+const logger =
+  new AKVLogger();
+
+
+/*
+===============================================================
+                       EXPORT
+===============================================================
+*/
+
+module.exports =
+  logger;
