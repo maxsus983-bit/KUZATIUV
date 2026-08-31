@@ -1,0 +1,1300 @@
+'use strict';
+
+/*
+===============================================================
+              AKV MOVEMENT ENGINE
+===============================================================
+
+AKV botning HARAKAT MOTORI.
+
+Qo'llab-quvvatlanadigan buyruqlar:
+
+    oldinga yur
+    10 blok oldinga yur
+
+    orqaga yur
+    20 blok orqaga yur
+
+    chapga yur
+    15 blok chapga yur
+
+    o'ngga yur
+    30 blok o'ngga yur
+
+    to'xta
+    sakra
+
+Shuningdek:
+
+    goTo(x, y, z)
+    goToPlayer(username)
+    followPlayer(username)
+
+===============================================================
+*/
+
+const EventEmitter =
+  require('events');
+
+
+class MovementEngine
+  extends EventEmitter {
+
+  constructor(options = {}) {
+
+    super();
+
+
+    /*
+    ============================================================
+    BEDROCK CLIENT
+    ============================================================
+    */
+
+    this.client =
+      options.client || null;
+
+
+    /*
+    ============================================================
+    BOT ENTITY
+    ============================================================
+    */
+
+    this.bot =
+      options.bot || null;
+
+
+    /*
+    ============================================================
+    HOLAT
+    ============================================================
+    */
+
+    this.state = {
+
+      moving: false,
+
+      jumping: false,
+
+      currentDirection: null,
+
+      currentTask: null,
+
+      cancelled: false
+
+    };
+
+
+    /*
+    ============================================================
+    HARAKAT SOZLAMALARI
+    ============================================================
+    */
+
+    this.config = {
+
+      /*
+      Harakat davomida qancha tez-tez input yuboriladi.
+      */
+
+      tickInterval: 50,
+
+
+      /*
+      Bitta harakatning maksimal davomiyligi.
+      */
+
+      maxMovementTime:
+        120000,
+
+
+      /*
+      Default yurish tezligi.
+      Bu keyinchalik real position packetlari bilan
+      avtomatik aniqlashtiriladi.
+      */
+
+      estimatedBlocksPerSecond:
+        4.3,
+
+
+      /*
+      Burilish uchun taxminiy vaqt.
+      */
+
+      turnTime:
+        250,
+
+
+      /*
+      Jump davomiyligi.
+      */
+
+      jumpTime:
+        650
+
+    };
+
+
+    /*
+    ============================================================
+    TASK ID
+    ============================================================
+    */
+
+    this.taskId = 0;
+
+
+    /*
+    ============================================================
+    TIMERLAR
+    ============================================================
+    */
+
+    this.movementTimer =
+      null;
+
+    this.jumpTimer =
+      null;
+
+    this.followTimer =
+      null;
+
+
+    /*
+    ============================================================
+    FOLLOW HOLATI
+    ============================================================
+    */
+
+    this.following = {
+
+      enabled: false,
+
+      username: null
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  CLIENT O'RNATISH
+  ============================================================== 
+  */
+
+  setClient(
+    client
+  ) {
+
+    this.client =
+      client;
+
+  }
+
+
+  /*
+  ==============================================================
+  BOT O'RNATISH
+  ============================================================== 
+  */
+
+  setBot(
+    bot
+  ) {
+
+    this.bot =
+      bot;
+
+  }
+
+
+  /*
+  ==============================================================
+  FORWARD
+  ==============================================================
+
+  Oldiga yurish.
+
+  duration milliseconds.
+  */
+
+  async forward(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'forward',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  BACKWARD
+  ============================================================== */
+
+  async backward(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'backward',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  LEFT
+  ============================================================== */
+
+  async left(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'left',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  RIGHT
+  ============================================================== */
+
+  async right(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'right',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  MOVE FOR
+  ==============================================================
+
+  Haqiqiy movement loop.
+
+  Eslatma:
+
+  Bedrock-protocol versiyasiga qarab input packet nomi va
+  struktura o'zgarishi mumkin. Shu sababli bu engine
+  packetni bitta markaziy metod orqali yuboradi.
+
+  Keyinchalik shu metodni navigator/pathfinder bilan
+  birlashtiramiz.
+  */
+
+  async moveFor(
+    direction,
+    duration
+  ) {
+
+    /*
+    ------------------------------------------------------------
+    VALIDATE
+    ------------------------------------------------------------
+    */
+
+    if (
+      ![
+        'forward',
+        'backward',
+        'left',
+        'right'
+      ].includes(
+        direction
+      )
+    ) {
+
+      return false;
+
+    }
+
+
+    duration =
+      Math.max(
+        50,
+        Math.min(
+          Number(duration) || 1000,
+          this.config.maxMovementTime
+        )
+      );
+
+
+    /*
+    ------------------------------------------------------------
+    OLDINGI TASKNI TO'XTATISH
+    ------------------------------------------------------------
+    */
+
+    this.cancelTask();
+
+
+    const id =
+      ++this.taskId;
+
+
+    this.state.cancelled =
+      false;
+
+    this.state.moving =
+      true;
+
+    this.state.currentDirection =
+      direction;
+
+    this.state.currentTask = {
+
+      id,
+
+      type:
+        'movement',
+
+      direction,
+
+      startedAt:
+        Date.now(),
+
+      duration
+
+    };
+
+
+    this.emit(
+      'movementStart',
+      this.state.currentTask
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    INPUTNI YOQISH
+    ------------------------------------------------------------
+    */
+
+    this.setMovementInput(
+      direction,
+      true
+    );
+
+
+    /*
+    ------------------------------------------------------------
+    LOOP
+    ------------------------------------------------------------
+    */
+
+    return new Promise(
+      resolve => {
+
+        const started =
+          Date.now();
+
+
+        const loop =
+          () => {
+
+            /*
+            Task bekor qilingan bo'lsa.
+            */
+
+            if (
+              this.state.cancelled ||
+              id !== this.taskId
+            ) {
+
+              this.setMovementInput(
+                direction,
+                false
+              );
+
+
+              this.finishMovement(
+                false
+              );
+
+
+              resolve(
+                false
+              );
+
+
+              return;
+
+            }
+
+
+            /*
+            Vaqt tugadi.
+            */
+
+            if (
+              Date.now() -
+              started >=
+              duration
+            ) {
+
+              this.setMovementInput(
+                direction,
+                false
+              );
+
+
+              this.finishMovement(
+                true
+              );
+
+
+              resolve(
+                true
+              );
+
+
+              return;
+
+            }
+
+
+            /*
+            Harakat inputini yangilab turamiz.
+            */
+
+            this.setMovementInput(
+              direction,
+              true
+            );
+
+
+            this.movementTimer =
+              setTimeout(
+                loop,
+                this.config.tickInterval
+              );
+
+          };
+
+
+        loop();
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  FINISH MOVEMENT
+  ============================================================== 
+  */
+
+  finishMovement(
+    success
+  ) {
+
+    this.stopAllInput();
+
+
+    const task =
+      this.state.currentTask;
+
+
+    this.state.moving =
+      false;
+
+    this.state.currentDirection =
+      null;
+
+    this.state.currentTask =
+      null;
+
+
+    this.emit(
+      'movementEnd',
+      {
+
+        success,
+
+        task
+
+      }
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  SET MOVEMENT INPUT
+  ==============================================================
+
+  Barcha harakat inputlari shu yerga keladi.
+
+  Bu joy keyingi Bedrock packet adapter bilan ishlaydi.
+  */
+
+  setMovementInput(
+    direction,
+    pressed
+  ) {
+
+    if (
+      !this.client
+    ) {
+
+      /*
+      Client ulanmagan bo'lsa ham engine crash qilmaydi.
+      */
+
+      return false;
+
+    }
+
+
+    try {
+
+      /*
+      ----------------------------------------------------------
+      Agar bot/client wrapper o'zining movement metodiga ega
+      bo'lsa, undan foydalanamiz.
+      ----------------------------------------------------------
+      */
+
+      if (
+        typeof this.client.setMovementInput ===
+        'function'
+      ) {
+
+        this.client.setMovementInput(
+          direction,
+          pressed
+        );
+
+
+        return true;
+
+      }
+
+
+      /*
+      ----------------------------------------------------------
+      Generic sendInput metod.
+      ----------------------------------------------------------
+      */
+
+      if (
+        typeof this.client.sendInput ===
+        'function'
+      ) {
+
+        this.client.sendInput({
+
+          direction,
+
+          pressed
+
+        });
+
+
+        return true;
+
+      }
+
+
+      /*
+      ----------------------------------------------------------
+      Generic movement event.
+      ----------------------------------------------------------
+      */
+
+      this.emit(
+        'input',
+        {
+
+          direction,
+
+          pressed
+
+        }
+      );
+
+
+      return true;
+
+    } catch (error) {
+
+      this.emit(
+        'error',
+        error
+      );
+
+
+      return false;
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  STOP
+  ============================================================== 
+  */
+
+  stop() {
+
+    this.cancelTask();
+
+    this.stopAllInput();
+
+  }
+
+
+  /*
+  ==============================================================
+  CANCEL TASK
+  ============================================================== 
+  */
+
+  cancelTask() {
+
+    this.state.cancelled =
+      true;
+
+
+    this.taskId++;
+
+
+    if (
+      this.movementTimer
+    ) {
+
+      clearTimeout(
+        this.movementTimer
+      );
+
+      this.movementTimer =
+        null;
+
+    }
+
+
+    this.stopAllInput();
+
+
+    this.state.moving =
+      false;
+
+    this.state.currentDirection =
+      null;
+
+    this.state.currentTask =
+      null;
+
+  }
+
+
+  /*
+  ==============================================================
+  STOP ALL INPUT
+  ============================================================== */
+
+  stopAllInput() {
+
+    const directions = [
+
+      'forward',
+
+      'backward',
+
+      'left',
+
+      'right'
+
+    ];
+
+
+    for (
+      const direction
+      of directions
+    ) {
+
+      this.setMovementInput(
+        direction,
+        false
+      );
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  JUMP
+  ============================================================== */
+
+  jump() {
+
+    if (
+      !this.client
+    ) {
+
+      this.emit(
+        'jump',
+        {
+
+          simulated:
+            true
+
+        }
+      );
+
+
+      return true;
+
+    }
+
+
+    try {
+
+      /*
+      Wrapper jump metodi.
+      */
+
+      if (
+        typeof this.client.jump ===
+        'function'
+      ) {
+
+        this.client.jump();
+
+
+        this.emit(
+          'jump',
+          {
+
+            success:
+              true
+
+          }
+        );
+
+
+        return true;
+
+      }
+
+
+      /*
+      Generic input.
+      */
+
+      if (
+        typeof this.client.sendInput ===
+        'function'
+      ) {
+
+        this.client.sendInput({
+
+          jump:
+            true
+
+        });
+
+
+        setTimeout(
+          () => {
+
+            try {
+
+              this.client.sendInput({
+
+                jump:
+                  false
+
+              });
+
+            } catch (_) {}
+
+          },
+          this.config.jumpTime
+        );
+
+
+        return true;
+
+      }
+
+
+      this.emit(
+        'jump',
+        {
+
+          success:
+            false
+
+        }
+      );
+
+
+      return false;
+
+    } catch (error) {
+
+      this.emit(
+        'error',
+        error
+      );
+
+
+      return false;
+
+    }
+
+  }
+
+
+  /*
+  ==============================================================
+  FACE POSITION
+  ==============================================================
+
+  Botni berilgan koordinataga qaratish.
+
+  Haqiqiy yaw/pitch hisoblash keyingi navigator adapterda
+  ishlatiladi.
+  */
+
+  facePosition(
+    position
+  ) {
+
+    if (
+      !position
+    ) {
+
+      return false;
+
+    }
+
+
+    this.emit(
+      'face',
+      {
+
+        position
+
+      }
+    );
+
+
+    /*
+    Agar client wrapper'da lookAt mavjud bo'lsa.
+    */
+
+    if (
+      this.client &&
+      typeof this.client.lookAt ===
+      'function'
+    ) {
+
+      try {
+
+        this.client.lookAt(
+          position
+        );
+
+
+        return true;
+
+      } catch (_) {
+
+        return false;
+
+      }
+
+    }
+
+
+    return true;
+
+  }
+
+
+  /*
+  ==============================================================
+  GO TO
+  ==============================================================
+
+  x/y/z koordinataga borish.
+
+  Hozircha navigator adapterga delegatsiya qilinadi.
+  */
+
+  async goTo(
+    x,
+    y,
+    z,
+    options = {}
+  ) {
+
+    const target = {
+
+      x:
+        Number(x),
+
+      y:
+        Number(y),
+
+      z:
+        Number(z)
+
+    };
+
+
+    if (
+      !Number.isFinite(
+        target.x
+      ) ||
+      !Number.isFinite(
+        target.y
+      ) ||
+      !Number.isFinite(
+        target.z
+      )
+    ) {
+
+      return false;
+
+    }
+
+
+    this.emit(
+      'goto',
+      {
+
+        target,
+
+        options
+
+      }
+    );
+
+
+    /*
+    Agar tashqi pathfinder mavjud bo'lsa.
+    */
+
+    if (
+      this.client &&
+      typeof this.client.goTo ===
+      'function'
+    ) {
+
+      try {
+
+        return await this.client.goTo(
+          target,
+          options
+        );
+
+      } catch (error) {
+
+        this.emit(
+          'error',
+          error
+        );
+
+
+        return false;
+
+      }
+
+    }
+
+
+    /*
+    Hozircha targetni face qilish.
+    */
+
+    this.facePosition(
+      target
+    );
+
+
+    return false;
+
+  }
+
+
+  /*
+  ==============================================================
+  GO TO PLAYER
+  ============================================================== */
+
+  async goToPlayer(
+    username,
+    options = {}
+  ) {
+
+    if (
+      !username
+    ) {
+
+      return false;
+
+    }
+
+
+    this.emit(
+      'gotoPlayer',
+      {
+
+        username,
+
+        options
+
+      }
+    );
+
+
+    if (
+      this.client &&
+      typeof this.client.goToPlayer ===
+      'function'
+    ) {
+
+      try {
+
+        return await this.client.goToPlayer(
+          username,
+          options
+        );
+
+      } catch (error) {
+
+        this.emit(
+          'error',
+          error
+        );
+
+
+        return false;
+
+      }
+
+    }
+
+
+    return false;
+
+  }
+
+
+  /*
+  ==============================================================
+  FOLLOW PLAYER
+  ==============================================================
+
+  Playerni kuzatish.
+
+  Haqiqiy pathfinding navigator bilan keyinroq ulanadi.
+  */
+
+  async followPlayer(
+    username,
+    options = {}
+  ) {
+
+    if (
+      !username
+    ) {
+
+      return false;
+
+    }
+
+
+    this.stopFollowing();
+
+
+    this.following.enabled =
+      true;
+
+    this.following.username =
+      username;
+
+
+    this.emit(
+      'followStart',
+      {
+
+        username
+
+      }
+    );
+
+
+    /*
+    Agar client wrapper to'g'ridan-to'g'ri follow qila olsa.
+    */
+
+    if (
+      this.client &&
+      typeof this.client.followPlayer ===
+      'function'
+    ) {
+
+      try {
+
+        const result =
+          await this.client.followPlayer(
+            username,
+            options
+          );
+
+
+        return result;
+
+      } catch (error) {
+
+        this.emit(
+          'error',
+          error
+        );
+
+      }
+
+    }
+
+
+    /*
+    Bu joyni keyingi Navigator boshqaradi.
+    */
+
+    return true;
+
+  }
+
+
+  /*
+  ==============================================================
+  STOP FOLLOW
+  ============================================================== */
+
+  stopFollowing() {
+
+    this.following.enabled =
+      false;
+
+    this.following.username =
+      null;
+
+
+    if (
+      this.followTimer
+    ) {
+
+      clearInterval(
+        this.followTimer
+      );
+
+      this.followTimer =
+        null;
+
+    }
+
+
+    this.emit(
+      'followStop'
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET STATUS
+  ============================================================== */
+
+  getStatus() {
+
+    return {
+
+      moving:
+        this.state.moving,
+
+      jumping:
+        this.state.jumping,
+
+      direction:
+        this.state.currentDirection,
+
+      task:
+        this.state.currentTask,
+
+      following:
+        this.following.enabled,
+
+      followingPlayer:
+        this.following.username
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  DESTROY
+  ============================================================== */
+
+  destroy() {
+
+    this.stop();
+
+    this.stopFollowing();
+
+
+    if (
+      this.jumpTimer
+    ) {
+
+      clearTimeout(
+        this.jumpTimer
+      );
+
+      this.jumpTimer =
+        null;
+
+    }
+
+
+    this.removeAllListeners();
+
+  }
+
+}
+
+
+module.exports =
+  MovementEngine;
