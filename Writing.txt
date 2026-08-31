@@ -1,0 +1,1372 @@
+'use strict';
+
+const logger = require('../core/logger');
+
+/*
+===============================================================
+ AKV NAVIGATOR
+===============================================================
+
+Vazifalar:
+
+  🚶 Oldinga yurish
+  🚶 Orqaga yurish
+  ↔️ Chap/o'ng harakat
+  🛑 To'xtash
+  🦘 Sakrash
+  👀 Burilish
+  🎯 Koordinataga borishga tayyorgarlik
+  👤 Player tomon harakat
+  🔄 Harakat holatini kuzatish
+
+Bu modul AI BRAIN bilan Movement Engine orasidagi
+bog'lovchi qatlam hisoblanadi.
+
+===============================================================
+*/
+
+
+class Navigator {
+
+  constructor(bot) {
+
+    this.bot = bot;
+
+    this.client = bot.client;
+
+    this.observer = bot.observer;
+
+    this.running = false;
+
+    this.currentTask = null;
+
+    this.stopRequested = false;
+
+    this.state = {
+
+      moving: false,
+
+      direction: 'none',
+
+      position: {
+
+        x: 0,
+
+        y: 0,
+
+        z: 0
+
+      },
+
+      rotation: {
+
+        yaw: 0,
+
+        pitch: 0
+
+      }
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  INITIALIZE
+  ============================================================== 
+  */
+
+  start() {
+
+    if (this.running) {
+
+      return;
+
+    }
+
+
+    this.running = true;
+
+
+    logger.info(
+      '🧭 Navigator ishga tushdi.'
+    );
+
+
+    this.updateLoop();
+
+  }
+
+
+  stop() {
+
+    this.running = false;
+
+    this.stopMoving();
+
+    this.cancelTask();
+
+  }
+
+
+  /*
+  ==============================================================
+  UPDATE LOOP
+  ==============================================================
+
+  Bot pozitsiyasini muntazam yangilaydi.
+  */
+
+  updateLoop() {
+
+    if (!this.running) {
+
+      return;
+
+    }
+
+
+    try {
+
+      const position =
+        this.getPosition();
+
+
+      if (position) {
+
+        this.state.position =
+          position;
+
+      }
+
+
+      const rotation =
+        this.getRotation();
+
+
+      if (rotation) {
+
+        this.state.rotation =
+          rotation;
+
+      }
+
+
+      if (
+        this.observer
+      ) {
+
+        this.observer
+          .setBotPosition(
+            this.state.position
+          );
+
+
+        this.observer
+          .setBotRotation(
+
+            this.state.rotation.yaw,
+
+            this.state.rotation.pitch
+
+          );
+
+      }
+
+    } catch (error) {
+
+      logger.error(
+        'Navigator update error:',
+        error
+      );
+
+    }
+
+
+    setTimeout(
+      () => this.updateLoop(),
+      250
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GET POSITION
+  ============================================================== 
+  */
+
+  getPosition() {
+
+    if (
+      this.bot.position
+    ) {
+
+      return {
+
+        x:
+          Number(
+            this.bot.position.x
+          ),
+
+        y:
+          Number(
+            this.bot.position.y
+          ),
+
+        z:
+          Number(
+            this.bot.position.z
+          )
+
+      };
+
+    }
+
+
+    if (
+      this.observer?.bot?.position
+    ) {
+
+      return {
+
+        ...this.observer.bot.position
+
+      };
+
+    }
+
+
+    return null;
+
+  }
+
+
+  /*
+  ==============================================================
+  GET ROTATION
+  ============================================================== 
+  */
+
+  getRotation() {
+
+    if (
+      this.bot.rotation
+    ) {
+
+      return {
+
+        yaw:
+          Number(
+            this.bot.rotation.yaw || 0
+          ),
+
+        pitch:
+          Number(
+            this.bot.rotation.pitch || 0
+          )
+
+      };
+
+    }
+
+
+    if (
+      this.observer?.bot?.rotation
+    ) {
+
+      return {
+
+        yaw:
+          Number(
+            this.observer.bot.rotation.yaw || 0
+          ),
+
+        pitch:
+          Number(
+            this.observer.bot.rotation.pitch || 0
+          )
+
+      };
+
+    }
+
+
+    return {
+
+      yaw: 0,
+
+      pitch: 0
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  SEND INPUT
+
+  Bedrock clientga movement input yuborishga urinadi.
+
+  Turli bedrock-protocol versiyalarida packet maydonlari
+  farq qilishi mumkin. Shu sababli imkon qadar xavfsiz
+  wrapper ishlatiladi.
+  ============================================================== 
+  */
+
+  sendInput(
+    input
+  ) {
+
+    if (
+      !this.client ||
+      !this.bot.connected
+    ) {
+
+      return false;
+
+    }
+
+
+    try {
+
+      /*
+      ------------------------------------------------------------
+      Agar botda maxsus input funksiyasi bo'lsa.
+      ------------------------------------------------------------
+      */
+
+      if (
+        typeof this.bot.sendInput ===
+        'function'
+      ) {
+
+        this.bot.sendInput(
+          input
+        );
+
+        return true;
+
+      }
+
+
+      /*
+      ------------------------------------------------------------
+      Client queue packet.
+      ------------------------------------------------------------
+      */
+
+      if (
+        typeof this.client.queue ===
+        'function'
+      ) {
+
+        /*
+        Universal packet emas.
+        Real packet nomi client versiyasiga bog'liq.
+
+        Keyingi Movement Engine shu qismni
+        aniq protocol packet bilan to'ldiradi.
+        */
+
+        return false;
+
+      }
+
+    } catch (error) {
+
+      logger.error(
+        'Movement input error:',
+        error
+      );
+
+    }
+
+
+    return false;
+
+  }
+
+
+  /*
+  ==============================================================
+  FORWARD
+  ============================================================== 
+  */
+
+  forward(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'forward',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  BACKWARD
+  ============================================================== 
+  */
+
+  backward(
+    duration = 1000
+  ) {
+
+    return this.moveFor(
+      'backward',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  LEFT
+  ============================================================== 
+  */
+
+  left(
+    duration = 700
+  ) {
+
+    return this.moveFor(
+      'left',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  RIGHT
+  ============================================================== 
+  */
+
+  right(
+    duration = 700
+  ) {
+
+    return this.moveFor(
+      'right',
+      duration
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  GENERIC MOVE
+  ============================================================== 
+  */
+
+  async moveFor(
+    direction,
+    duration = 1000
+  ) {
+
+    if (
+      !this.bot.connected
+    ) {
+
+      logger.warn(
+        'Bot ulanmagan.'
+      );
+
+      return false;
+
+    }
+
+
+    this.stopRequested = false;
+
+    this.state.moving = true;
+
+    this.state.direction =
+      direction;
+
+
+    logger.info(
+      `🚶 ${direction} ${duration}ms`
+    );
+
+
+    const start =
+      Date.now();
+
+
+    while (
+      Date.now() - start <
+      duration
+    ) {
+
+      if (
+        this.stopRequested ||
+        !this.bot.connected
+      ) {
+
+        break;
+
+      }
+
+
+      this.sendInput({
+
+        forward:
+          direction === 'forward'
+            ? 1
+            : direction === 'backward'
+              ? -1
+              : 0,
+
+        strafe:
+          direction === 'right'
+            ? 1
+            : direction === 'left'
+              ? -1
+              : 0
+
+      });
+
+
+      await this.sleep(
+        100
+      );
+
+    }
+
+
+    this.stopMoving();
+
+    return true;
+
+  }
+
+
+  /*
+  ==============================================================
+  STOP
+  ============================================================== 
+  */
+
+  stopMoving() {
+
+    this.stopRequested = true;
+
+    this.state.moving = false;
+
+    this.state.direction =
+      'none';
+
+
+    this.sendInput({
+
+      forward: 0,
+
+      strafe: 0,
+
+      jump: false,
+
+      sneak: false
+
+    });
+
+  }
+
+
+  /*
+  ==============================================================
+  JUMP
+  ============================================================== 
+  */
+
+  jump() {
+
+    if (
+      !this.bot.connected
+    ) {
+
+      return false;
+
+    }
+
+
+    logger.info(
+      '🦘 JUMP'
+    );
+
+
+    this.sendInput({
+
+      forward: 0,
+
+      strafe: 0,
+
+      jump: true
+
+    });
+
+
+    setTimeout(
+      () => {
+
+        this.sendInput({
+
+          jump: false
+
+        });
+
+      },
+      150
+    );
+
+
+    return true;
+
+  }
+
+
+  /*
+  ==============================================================
+  LOOK
+  ============================================================== 
+  */
+
+  look(
+    yaw,
+    pitch = 0
+  ) {
+
+    yaw =
+      Number(yaw) || 0;
+
+
+    pitch =
+      Number(pitch) || 0;
+
+
+    this.state.rotation = {
+
+      yaw,
+
+      pitch
+
+    };
+
+
+    if (
+      this.observer
+    ) {
+
+      this.observer
+        .setBotRotation(
+          yaw,
+          pitch
+        );
+
+    }
+
+
+    /*
+    Agar botda look funksiyasi mavjud bo'lsa.
+    */
+
+    if (
+      typeof this.bot.look ===
+      'function'
+    ) {
+
+      try {
+
+        this.bot.look(
+          yaw,
+          pitch
+        );
+
+        return true;
+
+      } catch (error) {
+
+        logger.error(
+          'Look error:',
+          error
+        );
+
+      }
+
+    }
+
+
+    return false;
+
+  }
+
+
+  /*
+  ==============================================================
+  TURN
+  ============================================================== 
+  */
+
+  turn(
+    degrees
+  ) {
+
+    const rotation =
+      this.getRotation();
+
+
+    const newYaw =
+      rotation.yaw +
+      Number(degrees || 0);
+
+
+    return this.look(
+      newYaw,
+      rotation.pitch
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  TURN LEFT
+  ============================================================== 
+  */
+
+  turnLeft(
+    degrees = 90
+  ) {
+
+    return this.turn(
+      -Math.abs(
+        Number(degrees)
+      )
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  TURN RIGHT
+  ============================================================== 
+  */
+
+  turnRight(
+    degrees = 90
+  ) {
+
+    return this.turn(
+      Math.abs(
+        Number(degrees)
+      )
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  FACE POSITION
+  ==============================================================
+
+  Berilgan koordinataga qaraydi.
+  */
+
+  facePosition(
+    target
+  ) {
+
+    const position =
+      this.getPosition();
+
+
+    if (
+      !position ||
+      !target
+    ) {
+
+      return false;
+
+    }
+
+
+    const dx =
+      Number(target.x) -
+      position.x;
+
+
+    const dy =
+      Number(target.y) -
+      position.y;
+
+
+    const dz =
+      Number(target.z) -
+      position.z;
+
+
+    const horizontal =
+      Math.sqrt(
+        dx * dx +
+        dz * dz
+      );
+
+
+    if (
+      horizontal === 0
+    ) {
+
+      return false;
+
+    }
+
+
+    const yaw =
+      Math.atan2(
+        -dx,
+        dz
+      ) *
+      180 /
+      Math.PI;
+
+
+    const pitch =
+      -Math.atan2(
+        dy,
+        horizontal
+      ) *
+      180 /
+      Math.PI;
+
+
+    return this.look(
+      yaw,
+      pitch
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  MOVE TOWARD POSITION
+  ==============================================================
+
+  Bu hali oddiy yo'nalishli movement.
+
+  To'liq pathfinding keyingi modulda ishlaydi.
+  ============================================================== 
+  */
+
+  async moveToward(
+    target,
+    options = {}
+  ) {
+
+    if (
+      !target
+    ) {
+
+      return false;
+
+    }
+
+
+    const maxTime =
+      options.maxTime || 10000;
+
+
+    const tolerance =
+      options.tolerance || 1.5;
+
+
+    const start =
+      Date.now();
+
+
+    this.currentTask = {
+
+      type: 'goto',
+
+      target
+
+    };
+
+
+    while (
+      this.bot.connected &&
+      Date.now() - start <
+      maxTime
+    ) {
+
+      if (
+        this.stopRequested
+      ) {
+
+        break;
+
+      }
+
+
+      const position =
+        this.getPosition();
+
+
+      if (!position) {
+
+        break;
+
+      }
+
+
+      const distance =
+        this.distance(
+          position,
+          target
+        );
+
+
+      if (
+        distance <= tolerance
+      ) {
+
+        this.stopMoving();
+
+        this.currentTask = null;
+
+        return true;
+
+      }
+
+
+      this.facePosition(
+        target
+      );
+
+
+      /*
+      ----------------------------------------------------------
+      Hozircha forward.
+
+      Keyingi Pathfinder modulida obstacle detection va
+      haqiqiy pathfinding qo'shiladi.
+      ----------------------------------------------------------
+      */
+
+      this.sendInput({
+
+        forward: 1,
+
+        strafe: 0
+
+      });
+
+
+      this.state.moving =
+        true;
+
+      this.state.direction =
+        'forward';
+
+
+      await this.sleep(
+        150
+      );
+
+    }
+
+
+    this.stopMoving();
+
+    this.currentTask = null;
+
+    return false;
+
+  }
+
+
+  /*
+  ==============================================================
+  GOTO PLAYER
+  ============================================================== 
+  */
+
+  async goToPlayer(
+    username,
+    options = {}
+  ) {
+
+    if (
+      !this.observer
+    ) {
+
+      return false;
+
+    }
+
+
+    const player =
+      this.observer.getPlayer(
+        username
+      );
+
+
+    if (
+      !player ||
+      !player.position
+    ) {
+
+      logger.warn(
+        `Player topilmadi: ${username}`
+      );
+
+      return false;
+
+    }
+
+
+    logger.info(
+      `🎯 ${username} tomon yurilmoqda.`
+    );
+
+
+    return this.moveToward(
+      player.position,
+      options
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  FOLLOW PLAYER
+  ==============================================================
+
+  Player harakat qilsa uning yangi koordinatasini olib,
+  qayta yo'naladi.
+  ============================================================== 
+  */
+
+  async followPlayer(
+    username,
+    options = {}
+  ) {
+
+    const interval =
+      options.interval || 1000;
+
+
+    const maxDistance =
+      options.maxDistance || 3;
+
+
+    const timeout =
+      options.timeout || 0;
+
+
+    const start =
+      Date.now();
+
+
+    this.currentTask = {
+
+      type: 'follow',
+
+      target:
+        username
+
+    };
+
+
+    logger.info(
+      `👤 ${username} kuzatilmoqda.`
+    );
+
+
+    while (
+      this.bot.connected &&
+      this.running
+    ) {
+
+      if (
+        timeout > 0 &&
+        Date.now() - start >
+        timeout
+      ) {
+
+        break;
+
+      }
+
+
+      const player =
+        this.observer?.getPlayer(
+          username
+        );
+
+
+      if (
+        !player ||
+        !player.position
+      ) {
+
+        logger.warn(
+          `Player ko'rinmayapti: ${username}`
+        );
+
+        this.stopMoving();
+
+        break;
+
+      }
+
+
+      const position =
+        this.getPosition();
+
+
+      const distance =
+        this.distance(
+          position,
+          player.position
+        );
+
+
+      if (
+        distance === null
+      ) {
+
+        break;
+
+      }
+
+
+      if (
+        distance > maxDistance
+      ) {
+
+        await this.moveToward(
+
+          player.position,
+
+          {
+
+            maxTime:
+              interval,
+
+            tolerance:
+              maxDistance
+
+          }
+
+        );
+
+      } else {
+
+        this.stopMoving();
+
+        this.facePosition(
+          player.position
+        );
+
+      }
+
+
+      await this.sleep(
+        interval
+      );
+
+    }
+
+
+    this.stopMoving();
+
+    this.currentTask = null;
+
+  }
+
+
+  /*
+  ==============================================================
+  GO TO COORDINATES
+  ============================================================== 
+  */
+
+  async goTo(
+    x,
+    y,
+    z,
+    options = {}
+  ) {
+
+    const target = {
+
+      x:
+        Number(x),
+
+      y:
+        Number(y),
+
+      z:
+        Number(z)
+
+    };
+
+
+    if (
+      !Number.isFinite(
+        target.x
+      ) ||
+      !Number.isFinite(
+        target.y
+      ) ||
+      !Number.isFinite(
+        target.z
+      )
+    ) {
+
+      logger.warn(
+        'Noto'g'ri koordinata.'
+      );
+
+      return false;
+
+    }
+
+
+    logger.info(
+      `🎯 GOTO ${target.x} ${target.y} ${target.z}`
+    );
+
+
+    return this.moveToward(
+      target,
+      options
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  CANCEL TASK
+  ============================================================== 
+  */
+
+  cancelTask() {
+
+    this.stopRequested = true;
+
+    this.currentTask = null;
+
+    this.stopMoving();
+
+  }
+
+
+  /*
+  ==============================================================
+  DISTANCE
+  ============================================================== 
+  */
+
+  distance(
+    a,
+    b
+  ) {
+
+    if (
+      !a ||
+      !b
+    ) {
+
+      return null;
+
+    }
+
+
+    const dx =
+      Number(a.x) -
+      Number(b.x);
+
+
+    const dy =
+      Number(a.y) -
+      Number(b.y);
+
+
+    const dz =
+      Number(a.z) -
+      Number(b.z);
+
+
+    return Math.sqrt(
+      dx * dx +
+      dy * dy +
+      dz * dz
+    );
+
+  }
+
+
+  /*
+  ==============================================================
+  STATUS
+  ============================================================== 
+  */
+
+  getState() {
+
+    return {
+
+      ...this.state,
+
+      currentTask:
+        this.currentTask,
+
+      connected:
+        Boolean(
+          this.bot.connected
+        )
+
+    };
+
+  }
+
+
+  /*
+  ==============================================================
+  SLEEP
+  ============================================================== 
+  */
+
+  sleep(ms) {
+
+    return new Promise(
+      resolve =>
+        setTimeout(
+          resolve,
+          ms
+        )
+    );
+
+  }
+
+}
+
+
+module.exports =
+  Navigator;
